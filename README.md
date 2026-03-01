@@ -19,7 +19,7 @@ An intelligent emergency response system that ensures timely assistance during c
 
 ## Project Planning
 
-![Project Planning Board](docs/project-planning.png)
+![Project Planning Board](docs/planning.png)
 
 ---
 
