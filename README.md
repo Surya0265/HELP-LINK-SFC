@@ -27,14 +27,14 @@ An intelligent emergency response system that ensures timely assistance during c
 
 | # | Module | Status |
 |---|--------|--------|
-| 1 | Calling System | Done |
-| 2 | Gesture Detection | Done |
+| 1 | Calling System | In Progress |
+| 2 | Gesture Detection | In Progress |
 | 3 | Mobile Access | In Progress |
 | 4 | AI Processing | In Progress |
 | 5 | Web Connection | In Progress |
 | 6 | Filtering System | In Progress |
 | 7 | Message Sharing System | In Progress |
-| 8 | Location Access (**important**) | In Progress |
+| 8 | Location Access | In Progress |
 | 9 | Mobile Activity Polling & Alert System | In Progress |
 | 10 | Backend Skeleton (connect all modules) | In Progress |
 
