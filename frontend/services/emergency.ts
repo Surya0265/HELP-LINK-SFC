@@ -40,16 +40,12 @@ async function requestSmsPermission(): Promise<boolean> {
  */
 async function sendDirectSms(phoneNumber: string, message: string): Promise<boolean> {
     try {
-        const SmsZ = NativeModules.SmsZ;
-        if (!SmsZ) {
-            console.warn('SmsZ native module not available');
+        const { DirectSms } = NativeModules;
+        if (!DirectSms) {
+            console.warn('DirectSms native module not available');
             return false;
         }
-        await SmsZ.send({
-            body: message,
-            recipients: [phoneNumber],
-            successTypes: ['sent'],
-        });
+        await DirectSms.sendDirectSms(phoneNumber, message);
         return true;
     } catch (error) {
         console.error('Failed to send SMS to', phoneNumber, error);
@@ -86,40 +82,23 @@ export async function triggerEmergency(): Promise<{ trackingUrl: string | null; 
     const netState = await NetInfo.fetch();
     const isOnline = netState.isConnected && netState.isInternetReachable;
 
-    let trackingUrl: string | null = null;
-    let sessionId: string | null = null;
+    // Send SMS with Google Maps pin immediately
+    await sendEmergencySmsToAll(contacts, location, null);
 
+    // If online, optionally stream GPS to backend in the background (fire and forget)
     if (isOnline) {
-        // CASE 1: Online — send to backend, get live tracking link
-        const result = await triggerOnlineEmergency(location, contacts);
-        trackingUrl = result.trackingUrl;
-        sessionId = result.sessionId;
-        activeSessionId = sessionId;
-
-        // Start streaming GPS every 5 seconds
         startLocationStreaming(USER_ID);
-
-        // Auto-send SMS with live tracking link to all contacts
-        const fullTrackingUrl = `${BACKEND_URL}${trackingUrl}`;
-        await sendEmergencySmsToAll(contacts, location, fullTrackingUrl);
     } else {
-        // CASE 2: Offline — auto-send SMS with static pin
-        await sendEmergencySmsToAll(contacts, location, null);
-
-        // Queue the alert for when internet returns
+        // Offline: Queue alert and periodically send SMS
         await enqueueAlert({ ...location, contacts });
-
-        // Send updated location SMS every 2 minutes
         startOfflineSmsInterval(contacts);
-
-        // Start watching for internet to return
         watchForConnectivity(contacts);
     }
 
     // CASE 3: Start battery monitoring (always)
     startBatteryMonitoring(contacts, location);
 
-    return { trackingUrl, sessionId };
+    return { trackingUrl: null, sessionId: null };
 }
 
 /**
@@ -129,19 +108,24 @@ async function triggerOnlineEmergency(
     location: CachedLocation,
     contacts: EmergencyContact[]
 ): Promise<{ trackingUrl: string; sessionId: string }> {
-    const res = await fetch(`${BACKEND_URL}/api/emergency/trigger`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            user_id: USER_ID,
-            latitude: location.latitude,
-            longitude: location.longitude,
-            accuracy: location.accuracy,
-            contacts,
-        }),
-    });
-    const data = await res.json();
-    return { trackingUrl: data.tracking_url, sessionId: data.session_id };
+    try {
+        const res = await fetch(`${BACKEND_URL}/api/emergency/trigger`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                user_id: USER_ID,
+                latitude: location.latitude,
+                longitude: location.longitude,
+                accuracy: location.accuracy,
+                contacts,
+            }),
+        });
+        const data = await res.json();
+        return { trackingUrl: data.tracking_url, sessionId: data.session_id };
+    } catch (error) {
+        console.warn('Backend unreachable for live tracking. Falling back to offline SMS.', error);
+        throw new Error('BACKEND_UNREACHABLE');
+    }
 }
 
 /**
