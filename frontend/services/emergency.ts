@@ -1,5 +1,4 @@
 import { NativeModules, PermissionsAndroid, Platform } from 'react-native';
-import * as Battery from 'expo-battery';
 import NetInfo from '@react-native-community/netinfo';
 import { getCurrentLocation, startLocationWatch, stopLocationWatch, mapsUrl } from './location';
 import { loadContacts, loadLocation, enqueueAlert, loadQueue, clearQueue, CachedLocation, EmergencyContact } from './storage';
@@ -10,8 +9,12 @@ const USER_ID = 'user_001'; // TODO: replace with real auth user ID
 
 let emergencyInterval: ReturnType<typeof setInterval> | null = null;
 let offlineSmsInterval: ReturnType<typeof setInterval> | null = null;
-let batterySubscription: Battery.Subscription | null = null;
 export let activeSessionId: string | null = null;
+
+// Helper to generate a random 8-character string for session IDs without native dependencies
+function generateSessionId() {
+    return Math.random().toString(36).substring(2, 10);
+}
 
 /**
  * Request SEND_SMS permission from the user (Android only, one-time).
@@ -82,12 +85,33 @@ export async function triggerEmergency(): Promise<{ trackingUrl: string | null; 
     const netState = await NetInfo.fetch();
     const isOnline = netState.isConnected && netState.isInternetReachable;
 
-    // Send SMS with Google Maps pin immediately
-    await sendEmergencySmsToAll(contacts, location, null);
+    // Generate the Predictive Session ID locally (pure JS to prevent native crashes)
+    const predictiveSessionId = generateSessionId();
+    activeSessionId = predictiveSessionId;
 
-    // If online, optionally stream GPS to backend in the background (fire and forget)
+    // Send the first SMS IMMEDIATELY (offline-first)
+    const trackingUrl = isOnline ? `${BACKEND_URL}/track/${predictiveSessionId}` : null;
+    await sendEmergencySmsToAll(contacts, location, trackingUrl);
+
+    // If online, explicitly register this specific session ID with the backend
     if (isOnline) {
-        startLocationStreaming(USER_ID);
+        try {
+            await fetch(`${BACKEND_URL}/api/emergency/trigger`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_id: USER_ID,
+                    session_id: predictiveSessionId, // Handing off our local ID
+                    latitude: location.latitude,
+                    longitude: location.longitude,
+                    accuracy: location.accuracy,
+                    contacts,
+                }),
+            });
+            startLocationStreaming(USER_ID);
+        } catch (e) {
+            console.warn("Backend unavailable during initial session registration. Streaming will pause.");
+        }
     } else {
         // Offline: Queue alert and periodically send SMS
         await enqueueAlert({ ...location, contacts });
@@ -95,37 +119,7 @@ export async function triggerEmergency(): Promise<{ trackingUrl: string | null; 
         watchForConnectivity(contacts);
     }
 
-    // CASE 3: Start battery monitoring (always)
-    startBatteryMonitoring(contacts, location);
-
-    return { trackingUrl: null, sessionId: null };
-}
-
-/**
- * CASE 1: Post emergency to backend and get tracking URL.
- */
-async function triggerOnlineEmergency(
-    location: CachedLocation,
-    contacts: EmergencyContact[]
-): Promise<{ trackingUrl: string; sessionId: string }> {
-    try {
-        const res = await fetch(`${BACKEND_URL}/api/emergency/trigger`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                user_id: USER_ID,
-                latitude: location.latitude,
-                longitude: location.longitude,
-                accuracy: location.accuracy,
-                contacts,
-            }),
-        });
-        const data = await res.json();
-        return { trackingUrl: data.tracking_url, sessionId: data.session_id };
-    } catch (error) {
-        console.warn('Backend unreachable for live tracking. Falling back to offline SMS.', error);
-        throw new Error('BACKEND_UNREACHABLE');
-    }
+    return { trackingUrl, sessionId: predictiveSessionId };
 }
 
 /**
@@ -161,8 +155,8 @@ async function sendEmergencySmsToAll(
 ) {
     const mapLink = trackingUrl ?? mapsUrl(location.latitude, location.longitude);
     const message = trackingUrl
-        ? `EMERGENCY! I need help! Track my live location: ${mapLink}`
-        : `EMERGENCY! I need help! My location: ${mapLink}`;
+        ? `HelpLink Test: Track my live location here: ${mapLink}`
+        : `HelpLink Test: My location: ${mapLink}`;
 
     // Send to each contact in parallel
     const promises = contacts.map((c) => sendDirectSms(c.phone, message));
@@ -170,7 +164,7 @@ async function sendEmergencySmsToAll(
 }
 
 /**
- * CASE 2: Send updated SMS every 2 minutes when offline.
+ * CASE 2: Send updated SMS every 1 minute when offline.
  */
 function startOfflineSmsInterval(contacts: EmergencyContact[]) {
     if (offlineSmsInterval) return;
@@ -179,7 +173,7 @@ function startOfflineSmsInterval(contacts: EmergencyContact[]) {
         if (loc) {
             await sendEmergencySmsToAll(contacts, loc, null);
         }
-    }, 2 * 60 * 1000); // every 2 minutes
+    }, 1 * 60 * 1000); // every 1 minute
 }
 
 /**
@@ -199,11 +193,30 @@ function watchForConnectivity(contacts: EmergencyContact[]) {
             // Switch to live tracking
             const loc = await getCurrentLocation() || await loadLocation();
             if (loc) {
-                const result = await triggerOnlineEmergency(loc, contacts);
-                activeSessionId = result.sessionId;
-                startLocationStreaming(USER_ID);
-                const fullUrl = `${BACKEND_URL}${result.trackingUrl}`;
-                await sendEmergencySmsToAll(contacts, loc, fullUrl);
+                // Generate a new tracking session if the old one died, or resume
+                const predictiveSessionId = generateSessionId();
+                activeSessionId = predictiveSessionId;
+
+                try {
+                    await fetch(`${BACKEND_URL}/api/emergency/trigger`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            user_id: USER_ID,
+                            session_id: predictiveSessionId,
+                            latitude: loc.latitude,
+                            longitude: loc.longitude,
+                            accuracy: loc.accuracy,
+                            contacts,
+                        }),
+                    });
+                    startLocationStreaming(USER_ID);
+                    const fullUrl = `${BACKEND_URL}/track/${predictiveSessionId}`;
+                    await sendEmergencySmsToAll(contacts, loc, fullUrl);
+                } catch {
+                    // Still offline logically
+                    startOfflineSmsInterval(contacts);
+                }
             }
         }
     });
@@ -229,25 +242,6 @@ async function flushOfflineQueue(contacts: EmergencyContact[]) {
 }
 
 /**
- * CASE 3: Monitor battery. Auto-send SMS when battery drops to 15%.
- */
-function startBatteryMonitoring(contacts: EmergencyContact[], lastLocation: CachedLocation) {
-    if (batterySubscription) return;
-    batterySubscription = Battery.addBatteryLevelListener(async ({ batteryLevel }) => {
-        if (batteryLevel <= 0.15) {
-            const loc = await getCurrentLocation() || lastLocation;
-            if (loc) {
-                const msg = `WARNING: My phone battery is at ${Math.round(batteryLevel * 100)}%. Last known location: ${mapsUrl(loc.latitude, loc.longitude)}. If I go unreachable, check this location.`;
-                const promises = contacts.map((c) => sendDirectSms(c.phone, msg));
-                await Promise.all(promises);
-            }
-            batterySubscription?.remove();
-            batterySubscription = null;
-        }
-    });
-}
-
-/**
  * Stop all emergency activities.
  */
 export async function stopEmergency() {
@@ -255,7 +249,6 @@ export async function stopEmergency() {
 
     if (emergencyInterval) { clearInterval(emergencyInterval); emergencyInterval = null; }
     if (offlineSmsInterval) { clearInterval(offlineSmsInterval); offlineSmsInterval = null; }
-    if (batterySubscription) { batterySubscription.remove(); batterySubscription = null; }
 
     if (activeSessionId) {
         try {

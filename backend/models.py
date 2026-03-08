@@ -18,6 +18,7 @@ class EmergencyContact(BaseModel):
 
 class EmergencyTrigger(BaseModel):
     user_id: str
+    session_id: str
     latitude: float
     longitude: float
     accuracy: Optional[float] = None

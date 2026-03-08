@@ -10,14 +10,13 @@ router = APIRouter(prefix="/api/emergency", tags=["Emergency"])
 def trigger_emergency(data: EmergencyTrigger):
     """
     Called when the user presses SOS.
-    Creates a tracking session and returns a live tracking URL.
+    Receives the locally generated tracking session ID from the phone.
     """
-    session_id = str(uuid.uuid4())[:8]  # short ID like "abc12345"
     contacts = [c.dict() for c in data.contacts]
 
     start_emergency(
         user_id=data.user_id,
-        session_id=session_id,
+        session_id=data.session_id,
         contacts=contacts,
         latitude=data.latitude,
         longitude=data.longitude,
@@ -25,8 +24,8 @@ def trigger_emergency(data: EmergencyTrigger):
 
     return {
         "status": "emergency_started",
-        "session_id": session_id,
-        "tracking_url": f"/track/{session_id}",
+        "session_id": data.session_id,
+        "tracking_url": f"/track/{data.session_id}",
         "user_id": data.user_id,
     }
 
