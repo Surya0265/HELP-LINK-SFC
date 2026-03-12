@@ -4,7 +4,7 @@ import { getCurrentLocation, startLocationWatch, stopLocationWatch, mapsUrl } fr
 import { loadContacts, loadLocation, enqueueAlert, loadQueue, clearQueue, CachedLocation, EmergencyContact } from './storage';
 
 // --- Configuration ---
-export const BACKEND_URL = 'http://192.168.1.4:8000';
+export const BACKEND_URL = 'https://8477-2401-4900-259e-feba-214a-f858-3884-dfb2.ngrok-free.app';
 const USER_ID = 'user_001'; // TODO: replace with real auth user ID
 
 let emergencyInterval: ReturnType<typeof setInterval> | null = null;

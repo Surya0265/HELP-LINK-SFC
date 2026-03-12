@@ -73,59 +73,58 @@ HELP-LINK-SFC/
 
 ## Getting Started
 
+To get the system fully running, you need to start three components in separate terminals.
+
 ### Prerequisites
 
-- **Node.js** (v18 or above) — [Download](https://nodejs.org/)
-- **Python** (v3.10 or above) — [Download](https://www.python.org/)
+- **Node.js** (v18+) — [Download](https://nodejs.org/)
+- **Python** (v3.10+) — [Download](https://www.python.org/)
 - **Expo Go** app on your phone — [Android](https://play.google.com/store/apps/details?id=host.exp.exponent) | [iOS](https://apps.apple.com/app/expo-go/id982107779)
 
-### 1. Clone the Repository
+---
 
+### Step 1: Start the Backend (FastAPI)
+The backend manages location data and emergency triggers.
 ```bash
-git clone https://github.com/Surya0265/HELP-LINK-SFC.git
-cd HELP-LINK-SFC
-```
-
-### 2. Backend Setup (FastAPI)
-
-```bash
-# Navigate to backend
 cd backend
-
-# Install dependencies
+python -m venv venv
+.\venv\Scripts\activate  # On Windows
+source venv/bin/activate # On Unix
 pip install -r requirements.txt
-
-# Start the server (with auto-reload)
-uvicorn main:app --reload
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
+**API Docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
 
-**Verify:** Open [http://localhost:8000](http://localhost:8000) — you should see:
-```json
-{"message": "Welcome to HelpLink:SFC API"}
-```
+---
 
-**API Docs:** Open [http://localhost:8000/docs](http://localhost:8000/docs) for interactive Swagger UI.
-
-### 3. Frontend Setup (React Native / Expo)
-
+### Step 2: Start the Public Tunnel (Ngrok)
+Required for the tracking links to work on the public internet.
 ```bash
-# Open a NEW terminal, navigate to frontend
-cd frontend
-
-# Install dependencies
-npm install
-
-# Start the Expo dev server
-npm start
+npx -y ngrok http 8000
 ```
+1. Copy the `https://...` URL from the terminal.
+2. This URL changes every time you restart Ngrok.
 
-**Verify:** Scan the QR code shown in the terminal using the **Expo Go** app on your phone.
+---
 
-> **Tip:** If your phone can't connect, try running with tunnel mode:
-> ```bash
-> npx expo start --tunnel
-> ```
+### Step 3: Update & Start the Frontend (Expo)
+1. **Configure API URL**: Open `frontend/services/emergency.ts` and update `BACKEND_URL`:
+   ```typescript
+   export const BACKEND_URL = 'https://YOUR-NEW-NGROK-ID.ngrok-free.app';
+   ```
+2. **Launch App**:
+   ```bash
+   cd frontend
+   npx expo start
+   ```
+3. Scan the QR code with **Expo Go** on your phone.
 
+---
+
+## How to Test Public Tracking
+1. Trigger an SOS in the app.
+2. Emergency contacts will receive an SMS with a link.
+3. Open that link on any device with internet access to see the live map.
 ---
 
 ## Key Features
