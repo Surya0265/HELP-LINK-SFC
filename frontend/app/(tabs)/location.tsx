@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import {
     View, Text, StyleSheet, TouchableOpacity, ScrollView, StatusBar,
 } from 'react-native';
-import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import NetInfo from '@react-native-community/netinfo';
 import { requestLocationPermission, getCurrentLocation, startLocationWatch } from '@/services/location';
 import { loadLocation, CachedLocation } from '@/services/storage';
@@ -55,32 +54,26 @@ export default function LocationScreen() {
                 </View>
             </View>
 
-            {/* Map */}
-            {permissionGranted && location ? (
-                <MapView
-                    style={styles.map}
-                    provider={PROVIDER_GOOGLE}
-                    region={{
-                        latitude: location.latitude,
-                        longitude: location.longitude,
-                        latitudeDelta: 0.005,
-                        longitudeDelta: 0.005,
-                    }}
-                >
-                    <Marker
-                        coordinate={{ latitude: location.latitude, longitude: location.longitude }}
-                        title="My Location"
-                        description={`Accuracy: ${location.accuracy?.toFixed(0) ?? '?'} m`}
-                        pinColor="#c0392b"
-                    />
-                </MapView>
-            ) : (
-                <View style={styles.noMap}>
+            {/* Location Status */}
+            <View style={styles.noMap}>
+                {permissionGranted && location ? (
+                    <View style={styles.locationInfo}>
+                        <Text style={styles.locationLabel}>Current Coordinates</Text>
+                        <Text style={styles.locationValue}>
+                            {location.latitude.toFixed(6)}, {location.longitude.toFixed(6)}
+                        </Text>
+                        {location.accuracy && (
+                            <Text style={styles.accuracyText}>
+                                Accuracy: ±{location.accuracy.toFixed(1)}m
+                            </Text>
+                        )}
+                    </View>
+                ) : (
                     <Text style={styles.noMapText}>
                         {permissionGranted ? 'Fetching location...' : 'Location permission not granted.'}
                     </Text>
-                </View>
-            )}
+                )}
+            </View>
 
             {/* Info Panel */}
             <ScrollView style={styles.infoPanel} contentContainerStyle={{ padding: 16 }}>
@@ -120,11 +113,16 @@ const styles = StyleSheet.create({
     online: { backgroundColor: '#1a4a2e' },
     offline: { backgroundColor: '#4a1a1a' },
     netText: { color: '#fff', fontSize: 12, fontWeight: '600' },
-    map: { height: 320 },
     noMap: {
-        height: 320, backgroundColor: '#1a1a1a',
+        height: 240, backgroundColor: '#1a1a1a',
         alignItems: 'center', justifyContent: 'center',
+        marginHorizontal: 16, marginTop: 16, borderRadius: 16,
+        borderWidth: 1, borderColor: '#2a2a2a',
     },
+    locationInfo: { alignItems: 'center' },
+    locationLabel: { color: '#888', fontSize: 14, marginBottom: 8 },
+    locationValue: { color: '#fff', fontSize: 28, fontWeight: '800', letterSpacing: 1 },
+    accuracyText: { color: '#c0392b', fontSize: 13, marginTop: 12, fontWeight: '600' },
     noMapText: { color: '#555', fontSize: 14 },
     infoPanel: { flex: 1, backgroundColor: '#0f0f0f' },
     row: {
