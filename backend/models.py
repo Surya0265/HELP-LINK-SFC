@@ -14,7 +14,7 @@ class LocationUpdate(BaseModel):
 class EmergencyContact(BaseModel):
     name: str
     phone: str
-
+    layer: Optional[int] = 1
 
 class EmergencyTrigger(BaseModel):
     user_id: str
@@ -23,6 +23,11 @@ class EmergencyTrigger(BaseModel):
     longitude: float
     accuracy: Optional[float] = None
     contacts: List[EmergencyContact] = []
+
+class EmergencyAcknowledge(BaseModel):
+    session_id: str
+    contact_phone: str
+    message: Optional[str] = None
 
 
 class EmergencyStop(BaseModel):

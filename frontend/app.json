@@ -20,7 +20,17 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.surya0265.frontend"
+      "package": "com.surya0265.frontend",
+      "permissions": [
+        "READ_CALL_LOG",
+        "READ_SMS",
+        "READ_CONTACTS"
+      ],
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyDummyKeyForTestingOnlyPLEASE_REPLACE"
+        }
+      }
     },
     "web": {
       "output": "static",
@@ -39,6 +49,14 @@
             "backgroundColor": "#000000"
           }
         }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
       ]
     ],
     "experiments": {
@@ -48,7 +66,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "1278ac2f-1a9d-4cdd-a6a5-fc73e610cbd7"
+        "projectId": "2a8a0b78-2e44-4d5f-b4ff-cb53050f47bf"
       }
     }
   }

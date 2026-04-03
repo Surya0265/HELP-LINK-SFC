@@ -51,11 +51,11 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="explore"
+        name="ranking"
         options={{
-          title: 'About',
+          title: 'Scanner',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="information-circle" size={size} color={color} />
+            <Ionicons name="hardware-chip" size={size} color={color} />
           ),
         }}
       />

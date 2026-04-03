@@ -43,8 +43,21 @@ def start_emergency(user_id: str, session_id: str, contacts: list,
         "latitude": latitude,
         "longitude": longitude,
         "status": "active",
+        "current_layer": 1,
+        "acknowledged_by": None,
+        "is_acknowledged": False
     }
     update_location(user_id, latitude, longitude, None)
+
+def update_emergency_layer(user_id: str, new_layer: int):
+    if user_id in emergency_store:
+        emergency_store[user_id]["current_layer"] = new_layer
+
+def acknowledge_emergency(user_id: str, contact_phone: str):
+    if user_id in emergency_store:
+        emergency_store[user_id]["status"] = "acknowledged"
+        emergency_store[user_id]["is_acknowledged"] = True
+        emergency_store[user_id]["acknowledged_by"] = contact_phone
 
 
 def stop_emergency(user_id: str):

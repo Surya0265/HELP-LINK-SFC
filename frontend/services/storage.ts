@@ -14,6 +14,7 @@ export interface CachedLocation {
 export interface EmergencyContact {
     name: string;
     phone: string;
+    layer?: number;
 }
 
 // --- Location Cache ---

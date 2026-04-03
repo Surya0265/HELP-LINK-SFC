@@ -2,6 +2,16 @@ import * as Location from 'expo-location';
 import { saveLocation, CachedLocation } from './storage';
 
 let locationSubscription: Location.LocationSubscription | null = null;
+const LOCATION_TIMEOUT_MS = 12000;
+
+function toCachedLocation(position: Location.LocationObject | any): CachedLocation {
+    return {
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+        timestamp: new Date().toISOString(),
+    };
+}
 
 /**
  * Request foreground location permission from the user.
@@ -18,19 +28,28 @@ export async function requestLocationPermission(): Promise<boolean> {
  */
 export async function getCurrentLocation(): Promise<CachedLocation | null> {
     try {
-        const position = await Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.High,
-        });
-        const cached: CachedLocation = {
-            latitude: position.coords.latitude,
-            longitude: position.coords.longitude,
-            accuracy: position.coords.accuracy,
-            timestamp: new Date().toISOString(),
-        };
+        const position = await Promise.race([
+            Location.getCurrentPositionAsync({
+                accuracy: Location.Accuracy.Balanced,
+            }),
+            new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('Location timed out')), LOCATION_TIMEOUT_MS)
+            ),
+        ]);
+        const cached = toCachedLocation(position as Location.LocationObject);
         await saveLocation(cached);
         return cached;
     } catch {
-        return null;
+        try {
+            const fallback = await Location.getLastKnownPositionAsync();
+            if (!fallback) return null;
+
+            const cached = toCachedLocation(fallback);
+            await saveLocation(cached);
+            return cached;
+        } catch {
+            return null;
+        }
     }
 }
 

@@ -1,7 +1,7 @@
-import uuid
 from fastapi import APIRouter, HTTPException
-from models import EmergencyTrigger, EmergencyStop
-from services.store import start_emergency, stop_emergency, get_emergency, get_emergency_by_session
+from models import EmergencyTrigger, EmergencyStop, EmergencyAcknowledge
+from pydantic import BaseModel
+from services.store import start_emergency, stop_emergency, get_emergency, get_emergency_by_session, update_emergency_layer, acknowledge_emergency
 
 router = APIRouter(prefix="/api/emergency", tags=["Emergency"])
 
@@ -37,6 +37,42 @@ def stop_emergency_route(data: EmergencyStop):
     """
     stop_emergency(data.user_id)
     return {"status": "emergency_stopped", "user_id": data.user_id}
+
+class LayerEscalate(BaseModel):
+    user_id: str
+    session_id: str
+    new_layer: int
+
+@router.post("/escalate-layer")
+def escalate_emergency_layer(data: LayerEscalate):
+    """
+    Called to move the emergency to the next tier of contacts.
+    """
+    emergency = get_emergency(data.user_id)
+    if not emergency or emergency.get("session_id") != data.session_id:
+        raise HTTPException(status_code=404, detail="Active emergency not found")
+
+    update_emergency_layer(data.user_id, data.new_layer)
+    return {"status": "layer_escalated", "current_layer": data.new_layer}
+
+@router.post("/acknowledge")
+def acknowledge(data: EmergencyAcknowledge):
+    """
+    Called when a reply is detected by the phone natively.
+    """
+    import services.store as store
+    # find user_id by session_id
+    user_id = None
+    for uid, em in store.emergency_store.items():
+        if em.get("session_id") == data.session_id:
+            user_id = uid
+            break
+
+    if not user_id:
+        raise HTTPException(status_code=404, detail="Active emergency not found")
+
+    acknowledge_emergency(user_id, data.contact_phone)
+    return {"status": "acknowledged", "phone": data.contact_phone}
 
 
 @router.get("/status/{user_id}")

@@ -1,11 +1,13 @@
-import { NativeModules, PermissionsAndroid, Platform } from 'react-native';
+import { NativeModules, PermissionsAndroid, Platform, Alert } from 'react-native';
 import NetInfo from '@react-native-community/netinfo';
 import { getCurrentLocation, startLocationWatch, stopLocationWatch, mapsUrl } from './location';
 import { loadContacts, loadLocation, enqueueAlert, loadQueue, clearQueue, CachedLocation, EmergencyContact } from './storage';
 
 // --- Configuration ---
-export const BACKEND_URL = 'https://8477-2401-4900-259e-feba-214a-f858-3884-dfb2.ngrok-free.app';
+export const BACKEND_URL = 'https://zora-unharked-incidentally.ngrok-free.dev';
 const USER_ID = 'user_001'; // TODO: replace with real auth user ID
+const NETWORK_TIMEOUT_MS = 10000;
+const SMS_TIMEOUT_MS = 60000; // Increased massively because opening the SMS UI takes time
 
 let emergencyInterval: ReturnType<typeof setInterval> | null = null;
 let offlineSmsInterval: ReturnType<typeof setInterval> | null = null;
@@ -16,13 +18,40 @@ function generateSessionId() {
     return Math.random().toString(36).substring(2, 10);
 }
 
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = NETWORK_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const fetchOptions = {
+            ...options,
+            headers: {
+                ...options.headers,
+                'ngrok-skip-browser-warning': 'true', // Required for ngrok free tier
+                'Bypass-Tunnel-Reminder': 'true'     // Alternate header
+            },
+            signal: controller.signal
+        };
+        return await fetch(url, fetchOptions);
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function sendDirectSmsWithTimeout(phoneNumber: string, message: string): Promise<boolean> {
+    return await Promise.race([
+        sendDirectSms(phoneNumber, message),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), SMS_TIMEOUT_MS)),
+    ]);
+}
+
 /**
  * Request SEND_SMS permission from the user (Android only, one-time).
  */
 async function requestSmsPermission(): Promise<boolean> {
     if (Platform.OS !== 'android') return false;
     try {
-        const granted = await PermissionsAndroid.request(
+        const timeoutPromise = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2000));
+        const permissionPromise = PermissionsAndroid.request(
             PermissionsAndroid.PERMISSIONS.SEND_SMS,
             {
                 title: 'HelpLink:SFC SMS Permission',
@@ -30,8 +59,9 @@ async function requestSmsPermission(): Promise<boolean> {
                 buttonPositive: 'Allow',
                 buttonNegative: 'Deny',
             }
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
+        ).then(granted => granted === PermissionsAndroid.RESULTS.GRANTED);
+        
+        return await Promise.race([permissionPromise, timeoutPromise]);
     } catch {
         return false;
     }
@@ -41,13 +71,28 @@ async function requestSmsPermission(): Promise<boolean> {
  * Send SMS directly from the phone — no SMS app opens, fully automatic.
  * Uses react-native-sms-z for background sending.
  */
+import * as SMS from 'expo-sms';
+
 async function sendDirectSms(phoneNumber: string, message: string): Promise<boolean> {
     try {
         const { DirectSms } = NativeModules;
+        
+        // Expo Go does not include custom native modules. Fallback to user-interactive SMS.
         if (!DirectSms) {
-            console.warn('DirectSms native module not available');
-            return false;
+            console.warn('DirectSms native module not available in Expo Go. Launching SMS app.');
+            
+            const isAvailable = await SMS.isAvailableAsync();
+            if (isAvailable) {
+                // This will open your phone's default messaging app with the text pre-filled.
+                await SMS.sendSMSAsync([phoneNumber], message);
+                return true;
+            } else {
+                Alert.alert('Try on an actual Android/iOS phone to see SMS launch.');
+                return false;
+            }
         }
+        
+        // This is your actual background logic once the app is fully built
         await DirectSms.sendDirectSms(phoneNumber, message);
         return true;
     } catch (error) {
@@ -69,7 +114,7 @@ export async function triggerEmergency(): Promise<{ trackingUrl: string | null; 
     // Request SMS permission first
     const smsAllowed = await requestSmsPermission();
     if (!smsAllowed) {
-        throw new Error('SMS permission denied. Please allow SMS permission to send emergency alerts.');
+        console.warn('SMS permission denied. Continuing without automatic SMS alerts.');
     }
 
     // Get fresh GPS (fall back to cached)
@@ -83,7 +128,7 @@ export async function triggerEmergency(): Promise<{ trackingUrl: string | null; 
 
     // Check network
     const netState = await NetInfo.fetch();
-    const isOnline = netState.isConnected && netState.isInternetReachable;
+    const isOnline = netState.isConnected === true && netState.isInternetReachable !== false;
 
     // Generate the Predictive Session ID locally (pure JS to prevent native crashes)
     const predictiveSessionId = generateSessionId();
@@ -91,12 +136,14 @@ export async function triggerEmergency(): Promise<{ trackingUrl: string | null; 
 
     // Send the first SMS IMMEDIATELY (offline-first)
     const trackingUrl = isOnline ? `${BACKEND_URL}/track/${predictiveSessionId}` : null;
-    await sendEmergencySmsToAll(contacts, location, trackingUrl);
+    if (smsAllowed) {
+        await sendEmergencySmsToAll(contacts, location, trackingUrl);
+    }
 
     // If online, explicitly register this specific session ID with the backend
     if (isOnline) {
         try {
-            await fetch(`${BACKEND_URL}/api/emergency/trigger`, {
+            await fetchWithTimeout(`${BACKEND_URL}/api/emergency/trigger`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -115,8 +162,10 @@ export async function triggerEmergency(): Promise<{ trackingUrl: string | null; 
     } else {
         // Offline: Queue alert and periodically send SMS
         await enqueueAlert({ ...location, contacts });
-        startOfflineSmsInterval(contacts);
-        watchForConnectivity(contacts);
+        if (smsAllowed) {
+            startOfflineSmsInterval(contacts);
+        }
+        watchForConnectivity(contacts, smsAllowed);
     }
 
     return { trackingUrl, sessionId: predictiveSessionId };
@@ -128,7 +177,7 @@ export async function triggerEmergency(): Promise<{ trackingUrl: string | null; 
 function startLocationStreaming(userId: string) {
     startLocationWatch(async (loc) => {
         try {
-            await fetch(`${BACKEND_URL}/api/location/update`, {
+            await fetchWithTimeout(`${BACKEND_URL}/api/location/update`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -158,9 +207,9 @@ async function sendEmergencySmsToAll(
         ? `HelpLink Test: Track my live location here: ${mapLink}`
         : `HelpLink Test: My location: ${mapLink}`;
 
-    // Send to each contact in parallel
-    const promises = contacts.map((c) => sendDirectSms(c.phone, message));
-    await Promise.all(promises);
+    // Send to each contact in parallel, but do not block forever on any single number.
+    const promises = contacts.map((c) => sendDirectSmsWithTimeout(c.phone, message));
+    await Promise.allSettled(promises);
 }
 
 /**
@@ -179,7 +228,7 @@ function startOfflineSmsInterval(contacts: EmergencyContact[]) {
 /**
  * Watch for internet to return. When it does, flush the queue.
  */
-function watchForConnectivity(contacts: EmergencyContact[]) {
+function watchForConnectivity(contacts: EmergencyContact[], smsAllowed: boolean) {
     const unsubscribe = NetInfo.addEventListener(async (state) => {
         if (state.isConnected && state.isInternetReachable) {
             unsubscribe();
@@ -198,7 +247,7 @@ function watchForConnectivity(contacts: EmergencyContact[]) {
                 activeSessionId = predictiveSessionId;
 
                 try {
-                    await fetch(`${BACKEND_URL}/api/emergency/trigger`, {
+                    await fetchWithTimeout(`${BACKEND_URL}/api/emergency/trigger`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -212,10 +261,14 @@ function watchForConnectivity(contacts: EmergencyContact[]) {
                     });
                     startLocationStreaming(USER_ID);
                     const fullUrl = `${BACKEND_URL}/track/${predictiveSessionId}`;
-                    await sendEmergencySmsToAll(contacts, loc, fullUrl);
+                    if (smsAllowed) {
+                        await sendEmergencySmsToAll(contacts, loc, fullUrl);
+                    }
                 } catch {
                     // Still offline logically
-                    startOfflineSmsInterval(contacts);
+                    if (smsAllowed) {
+                        startOfflineSmsInterval(contacts);
+                    }
                 }
             }
         }
@@ -229,7 +282,7 @@ async function flushOfflineQueue(contacts: EmergencyContact[]) {
     const queue = await loadQueue();
     for (const alert of queue) {
         try {
-            await fetch(`${BACKEND_URL}/api/location/update`, {
+            await fetchWithTimeout(`${BACKEND_URL}/api/location/update`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user_id: USER_ID, ...alert }),
@@ -252,7 +305,7 @@ export async function stopEmergency() {
 
     if (activeSessionId) {
         try {
-            await fetch(`${BACKEND_URL}/api/emergency/stop`, {
+            await fetchWithTimeout(`${BACKEND_URL}/api/emergency/stop`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user_id: USER_ID, session_id: activeSessionId }),
