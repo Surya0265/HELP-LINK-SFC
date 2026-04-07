@@ -5,9 +5,10 @@ import {
 } from 'react-native';
 import NetInfo from '@react-native-community/netinfo';
 import { requestLocationPermission, getCurrentLocation } from '@/services/location';
-import { triggerEmergency, stopEmergency, activeSessionId } from '@/services/emergency';
+import { triggerEmergency, stopEmergency, escalateEmergencyLayer, activeSessionId } from '@/services/emergency';
 import { loadContacts, saveContacts, EmergencyContact, loadLocation } from '@/services/storage';
 import { useFocusEffect } from 'expo-router';
+import useShakeSOS from '@/hooks/useShakeSOS';
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   return await Promise.race([
@@ -27,6 +28,14 @@ export default function HomeScreen() {
   const [selectedLayer, setSelectedLayer] = useState(1);
   const [lastLocation, setLastLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [permissionGranted, setPermissionGranted] = useState(false);
+
+  // Timer Escalation States
+  const [currentAlertLayer, setCurrentAlertLayer] = useState(1);
+  const [countdown, setCountdown] = useState(30);
+  const [isTimerActive, setIsTimerActive] = useState(false);
+
+  // Shake Detection State
+  const [isShakeWarningActive, setIsShakeWarningActive] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -53,12 +62,47 @@ export default function HomeScreen() {
     return () => unsub();
   }, []);
 
-  const handleSOS = async () => {
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isEmergency && isTimerActive && countdown > 0) {
+      interval = setInterval(() => {
+        setCountdown((prev) => prev - 1);
+      }, 1000);
+    } else if (isEmergency && isTimerActive && countdown === 0) {
+      if (currentAlertLayer < 3) {
+        const nextLayer = currentAlertLayer + 1;
+        escalateToNextLayer(nextLayer);
+      } else {
+        setIsTimerActive(false);
+        Alert.alert('Max Layer Reached', 'Alert sent to layer 3. Wait for rescue.');
+      }
+    }
+    return () => clearInterval(interval);
+  }, [isEmergency, isTimerActive, countdown, currentAlertLayer]);
+
+  const escalateToNextLayer = async (nextLayer: number) => {
+    setIsTimerActive(false); 
+    try {
+      await escalateEmergencyLayer(nextLayer, trackingUrl);
+      setCurrentAlertLayer(nextLayer);
+      setCountdown(30);
+      setIsTimerActive(true);
+    } catch (e) {
+      console.warn('Failed to escalate', e);
+      setCountdown(5); // retry quickly
+      setIsTimerActive(true);
+    }
+  };
+
+  const executeSOS = useCallback(async () => {
     if (isEmergency) {
       // Stop emergency
       await stopEmergency();
       setIsEmergency(false);
       setTrackingUrl(null);
+      setIsTimerActive(false);
+      setCurrentAlertLayer(1);
+      setCountdown(30);
       Alert.alert('Emergency Stopped', 'Your emergency has been cancelled.');
       return;
     }
@@ -76,12 +120,23 @@ export default function HomeScreen() {
     setLoading(true);
     try {
       const result = await withTimeout(
-        triggerEmergency(),
+        triggerEmergency(() => {
+          // This callback fires when a reply is detected
+          setIsTimerActive(false);
+          setIsEmergency(false);
+          setTrackingUrl(null);
+          setCurrentAlertLayer(1);
+          setCountdown(30);
+          Alert.alert('Emergency Acknowledged', 'A contact has replied to your SMS! The emergency escalation has halted.');
+        }),
         20000,
         'Emergency request timed out. Please try again.'
       );
       setIsEmergency(true);
       setTrackingUrl(result.trackingUrl);
+      setCurrentAlertLayer(1);
+      setCountdown(30);
+      setIsTimerActive(true);
 
       const loc = await loadLocation();
       if (loc) setLastLocation({ lat: loc.latitude, lng: loc.longitude });
@@ -98,7 +153,21 @@ export default function HomeScreen() {
     } finally {
       setLoading(false);
     }
+  }, [isEmergency, permissionGranted, contacts.length, networkStatus]);
+
+  const handleSOS = async () => {
+    executeSOS();
   };
+
+  useShakeSOS(
+    !isEmergency, // Only active if SOS is NOT currently running
+    () => setIsShakeWarningActive(true), // Shake 2 times callback
+    () => { // Additional 2 shakes callback (Confirmed)
+      setIsShakeWarningActive(false);
+      executeSOS();
+    },
+    () => setIsShakeWarningActive(false) // Cooldown timeout callback
+  );
 
   const addContact = async () => {
     const name = newName.trim();
@@ -159,6 +228,26 @@ export default function HomeScreen() {
           <View style={styles.trackingCard}>
             <Text style={styles.trackingLabel}>Live Tracking Active</Text>
             <Text style={styles.trackingUrl}>{trackingUrl}</Text>
+          </View>
+        )}
+
+        {/* Layer Countdown display */}
+        {isEmergency && isTimerActive && (
+          <View style={styles.timerCard}>
+            <Text style={styles.timerLabel}>Layer {currentAlertLayer} Alert Active</Text>
+            <Text style={styles.timerText}>
+              {currentAlertLayer < 3 
+                ? `Escalating to Layer ${currentAlertLayer + 1} in ${countdown}s...` 
+                : 'Maximum alert layer reached.'}
+            </Text>
+          </View>
+        )}
+
+        {/* Shake Detection Active Warning */}
+        {isShakeWarningActive && (
+          <View style={styles.shakeWarningCard}>
+            <Text style={styles.shakeWarningTitle}>SOS Pending...</Text>
+            <Text style={styles.shakeWarningText}>Shake 2 more times to trigger immediately!</Text>
           </View>
         )}
 
@@ -287,6 +376,19 @@ const styles = StyleSheet.create({
   },
   trackingLabel: { color: '#2ecc71', fontSize: 12, fontWeight: '700', marginBottom: 4 },
   trackingUrl: { color: '#aaa', fontSize: 12 },
+  timerCard: {
+    backgroundColor: '#3a1a1a', borderRadius: 12, padding: 16,
+    marginBottom: 16, borderWidth: 1, borderColor: '#e74c3c',
+  },
+  timerLabel: { color: '#e74c3c', fontSize: 14, fontWeight: '700', marginBottom: 4 },
+  timerText: { color: '#fff', fontSize: 14 },
+  shakeWarningCard: {
+    backgroundColor: '#ff9800', borderRadius: 12, padding: 16,
+    marginBottom: 16, alignItems: 'center', shadowColor: '#ff9800', 
+    shadowOpacity: 0.6, shadowRadius: 10, elevation: 8,
+  },
+  shakeWarningTitle: { color: '#fff', fontSize: 20, fontWeight: '900', marginBottom: 4 },
+  shakeWarningText: { color: '#fff', fontSize: 14, fontWeight: '600' },
   sosButton: {
     backgroundColor: '#c0392b', borderRadius: 120, width: 200, height: 200,
     alignSelf: 'center', alignItems: 'center', justifyContent: 'center',

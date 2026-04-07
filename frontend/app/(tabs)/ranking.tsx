@@ -10,6 +10,7 @@ import { Ionicons } from '@expo/vector-icons';
 export default function RankingScreen() {
   const [isRanking, setIsRanking] = useState(false);
   const [rankingProgress, setRankingProgress] = useState('');
+  const [scannedGroups, setScannedGroups] = useState<{name: string; phone: string; layer: number}[]>([]);
   const [rankingLogs, setRankingLogs] = useState<string[]>([
     '[System] Ready to run Auto-Detect Sequence.',
     '[System] Press the START ALGORITHM button below to begin.'
@@ -21,6 +22,7 @@ export default function RankingScreen() {
       setIsRanking(true);
       setRankingLogs(['[System] Initializing Smart Ranking Algorithm...']);
       setRankingProgress('Initializing...');
+      setScannedGroups([]);
       
       const ranked = await calculateSmartRankings((msg) => {
         setRankingProgress(msg);
@@ -29,25 +31,31 @@ export default function RankingScreen() {
 
       setRankingLogs(prev => [...prev, `[Success] Found ${ranked.length} valid contacts.`]);
       
-      const topRanked = ranked.slice(0, 5); // Take top 5
+      const topRanked = ranked.slice(0, 20); // Take top 20 contacts for multiple layers
       const existingContacts = await loadContacts();
       const newContactsList = [...existingContacts];
+      const newlyAdded: {name: string; phone: string; layer: number}[] = [];
 
-      // Add avoiding duplicates. Hardcode ranking scanner additions to Layer 1.
-      topRanked.forEach((r) => {
+      // Add avoiding duplicates. Distribute into layers 1, 2, and 3.
+      topRanked.forEach((r, index) => {
+        // Top 7: Layer 1 | Next 7: Layer 2 | Remainder (6): Layer 3
+        const assignedLayer = index < 7 ? 1 : index < 14 ? 2 : 3;
+
         if (!newContactsList.find((c) => c.phone === r.phone)) {
-          newContactsList.push({ name: r.name, phone: r.phone, layer: 1 });
-          setRankingLogs(prev => [...prev, `+ Matched & Added: ${r.name} (${r.phone})`]);
+          newContactsList.push({ name: r.name, phone: r.phone, layer: assignedLayer });
+          newlyAdded.push({ name: r.name, phone: r.phone, layer: assignedLayer });
+          setRankingLogs(prev => [...prev, `+ Layer ${assignedLayer} Mapping: ${r.name} (${r.phone})`]);
         } else {
           setRankingLogs(prev => [...prev, `- Skipped (Exists): ${r.name} (${r.phone})`]);
         }
       });
       
       await saveContacts(newContactsList);
+      setScannedGroups(newlyAdded);
       
-      setRankingLogs(prev => [...prev, `[Done] Auto-detected and added ${topRanked.length} closest contacts.`]);
+      setRankingLogs(prev => [...prev, `[Done] Auto-detected and structured ${topRanked.length} closest contacts into layers.`]);
       setTimeout(() => {
-        Alert.alert('Scan Complete', `Auto-detected and imported ${topRanked.length} closest contacts to your SOS list!`);
+        Alert.alert('Scan Complete', `Auto-detected and imported ${topRanked.length} closest contacts into your SOS layers!`);
         setIsRanking(false);
       }, 1000);
       
@@ -90,6 +98,27 @@ export default function RankingScreen() {
              {isRanking ? 'SCAN IN PROGRESS...' : 'START ALGORITHM'}
           </Text>
         </TouchableOpacity>
+
+        {/* Scanned Layer Bubbles output */}
+        {scannedGroups.length > 0 && (
+          <View style={styles.bubblesContainer}>
+            <Text style={styles.bubblesHeader}>Auto-Assigned Escalation</Text>
+            <View style={styles.bubblesRow}>
+              {[1, 2, 3].map((layer) => {
+                const inLayer = scannedGroups.filter(c => c.layer === layer);
+                if (inLayer.length === 0) return null;
+                return (
+                  <View key={layer} style={[styles.bubbleWrapper, layer === 1 ? styles.b1 : layer === 2 ? styles.b2 : styles.b3]}>
+                    <Text style={styles.bubbleLayerTitle}>Layer {layer}</Text>
+                    {inLayer.map((ct, idx) => (
+                      <Text key={idx} style={styles.bubbleContactName} numberOfLines={1}>{ct.name}</Text>
+                    ))}
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        )}
 
         {/* Live Visualization Terminal */}
         <View style={styles.terminalContainer}>
@@ -160,4 +189,22 @@ const styles = StyleSheet.create({
   terminalBody: { padding: 16, flex: 1 },
   terminalLogLine: { color: '#00ff00', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', fontSize: 12, marginBottom: 6, lineHeight: 18 },
   terminalLogPrefix: { color: '#555', fontWeight: 'bold' },
+  
+  bubblesContainer: {
+    marginBottom: 20,
+    backgroundColor: '#111', borderRadius: 12, padding: 16,
+    borderWidth: 1, borderColor: '#333'
+  },
+  bubblesHeader: { color: '#aaa', fontSize: 12, fontWeight: '800', letterSpacing: 1.5, marginBottom: 12, textAlign: 'center' },
+  bubblesRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 },
+  bubbleWrapper: { 
+    flex: 1, borderRadius: 100, paddingVertical: 18, paddingHorizontal: 10,
+    alignItems: 'center', justifyContent: 'center', minHeight: 100,
+    borderWidth: 1.5 
+  },
+  b1: { backgroundColor: 'rgba(231, 76, 60, 0.1)', borderColor: '#e74c3c' }, // Red (Critical)
+  b2: { backgroundColor: 'rgba(243, 156, 18, 0.1)', borderColor: '#f39c12' }, // Orange (Secondary)
+  b3: { backgroundColor: 'rgba(52, 152, 219, 0.1)', borderColor: '#3498db' }, // Blue (Fallback)
+  bubbleLayerTitle: { color: '#fff', fontSize: 14, fontWeight: '800', marginBottom: 4 },
+  bubbleContactName: { color: '#ccc', fontSize: 11, textAlign: 'center', marginVertical: 2, fontWeight: '600' }
 });

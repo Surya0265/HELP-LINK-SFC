@@ -1,5 +1,7 @@
 import { NativeModules, PermissionsAndroid, Platform, Alert } from 'react-native';
 import NetInfo from '@react-native-community/netinfo';
+import * as SMS from 'expo-sms';
+import SmsAndroid from 'react-native-get-sms-android';
 import { getCurrentLocation, startLocationWatch, stopLocationWatch, mapsUrl } from './location';
 import { loadContacts, loadLocation, enqueueAlert, loadQueue, clearQueue, CachedLocation, EmergencyContact } from './storage';
 
@@ -11,6 +13,8 @@ const SMS_TIMEOUT_MS = 60000; // Increased massively because opening the SMS UI 
 
 let emergencyInterval: ReturnType<typeof setInterval> | null = null;
 let offlineSmsInterval: ReturnType<typeof setInterval> | null = null;
+let smsReplyInterval: ReturnType<typeof setInterval> | null = null;
+let emergencyStartTime: number = 0;
 export let activeSessionId: string | null = null;
 
 // Helper to generate a random 8-character string for session IDs without native dependencies
@@ -51,15 +55,13 @@ async function requestSmsPermission(): Promise<boolean> {
     if (Platform.OS !== 'android') return false;
     try {
         const timeoutPromise = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2000));
-        const permissionPromise = PermissionsAndroid.request(
+        const permissionPromise = PermissionsAndroid.requestMultiple([
             PermissionsAndroid.PERMISSIONS.SEND_SMS,
-            {
-                title: 'HelpLink:SFC SMS Permission',
-                message: 'This app needs permission to send emergency SMS alerts automatically.',
-                buttonPositive: 'Allow',
-                buttonNegative: 'Deny',
-            }
-        ).then(granted => granted === PermissionsAndroid.RESULTS.GRANTED);
+            PermissionsAndroid.PERMISSIONS.READ_SMS
+        ]).then(statuses => 
+            statuses[PermissionsAndroid.PERMISSIONS.SEND_SMS] === PermissionsAndroid.RESULTS.GRANTED &&
+            statuses[PermissionsAndroid.PERMISSIONS.READ_SMS] === PermissionsAndroid.RESULTS.GRANTED
+        );
         
         return await Promise.race([permissionPromise, timeoutPromise]);
     } catch {
@@ -71,8 +73,6 @@ async function requestSmsPermission(): Promise<boolean> {
  * Send SMS directly from the phone — no SMS app opens, fully automatic.
  * Uses react-native-sms-z for background sending.
  */
-import * as SMS from 'expo-sms';
-
 async function sendDirectSms(phoneNumber: string, message: string): Promise<boolean> {
     try {
         const { DirectSms } = NativeModules;
@@ -105,7 +105,7 @@ async function sendDirectSms(phoneNumber: string, message: string): Promise<bool
  * Main function called when SOS is pressed.
  * Handles all 3 cases: online, offline, and battery monitoring.
  */
-export async function triggerEmergency(): Promise<{ trackingUrl: string | null; sessionId: string | null }> {
+export async function triggerEmergency(onAcknowledge?: () => void): Promise<{ trackingUrl: string | null; sessionId: string | null }> {
     const contacts = await loadContacts();
     if (contacts.length === 0) {
         throw new Error('No emergency contacts configured. Please add contacts first.');
@@ -134,10 +134,15 @@ export async function triggerEmergency(): Promise<{ trackingUrl: string | null; 
     const predictiveSessionId = generateSessionId();
     activeSessionId = predictiveSessionId;
 
-    // Send the first SMS IMMEDIATELY (offline-first)
+    // Send the first SMS IMMEDIATELY to Layer 1 (offline-first)
     const trackingUrl = isOnline ? `${BACKEND_URL}/track/${predictiveSessionId}` : null;
     if (smsAllowed) {
-        await sendEmergencySmsToAll(contacts, location, trackingUrl);
+        const layer1Contacts = contacts.filter((c) => (c.layer || 1) === 1);
+        if (layer1Contacts.length > 0) {
+            await sendEmergencySmsToAll(layer1Contacts, location, trackingUrl);
+        } else {
+            console.warn('No Layer 1 contacts found! Please assign contacts to Layer 1.');
+        }
     }
 
     // If online, explicitly register this specific session ID with the backend
@@ -166,6 +171,10 @@ export async function triggerEmergency(): Promise<{ trackingUrl: string | null; 
             startOfflineSmsInterval(contacts);
         }
         watchForConnectivity(contacts, smsAllowed);
+    }
+
+    if (smsAllowed) {
+        startSmsReplyPolling(contacts, onAcknowledge);
     }
 
     return { trackingUrl, sessionId: predictiveSessionId };
@@ -295,6 +304,61 @@ async function flushOfflineQueue(contacts: EmergencyContact[]) {
 }
 
 /**
+ * Native Android SMS Polling mapping incoming replies from contacts.
+ */
+function startSmsReplyPolling(contacts: EmergencyContact[], onAck?: () => void) {
+    if (Platform.OS !== 'android') return;
+    if (smsReplyInterval) clearInterval(smsReplyInterval);
+    emergencyStartTime = Date.now();
+
+    smsReplyInterval = setInterval(() => {
+        // Strip formatting, get the last 10 digits
+        const numbers = contacts.map(c => c.phone.replace(/\D/g, '').slice(-10)).filter(n => n.length >= 10);
+        if (numbers.length === 0) return;
+
+        const filter = {
+            box: 'inbox',
+            minDate: emergencyStartTime,
+            maxDate: Date.now()
+        };
+
+        SmsAndroid.list(
+            JSON.stringify(filter),
+            (fail: any) => console.log('SmsAndroid.list failed', fail),
+            (count: number, smsList: string) => {
+                try {
+                    const messages = JSON.parse(smsList);
+                    for (const msg of messages) {
+                        const senderStr = (msg.address || '').replace(/\D/g, '');
+                        // If any sender ends with any of our contact numbers
+                        if (numbers.some(num => senderStr.endsWith(num))) {
+                            // Hit the acknowledgment condition!
+                            if (smsReplyInterval) clearInterval(smsReplyInterval);
+                            smsReplyInterval = null;
+
+                            if (activeSessionId) {
+                                fetch(`${BACKEND_URL}/api/emergency/acknowledge`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ session_id: activeSessionId })
+                                }).catch(() => {});
+                            }
+
+                            // Trigger the UI cascade
+                            stopEmergency();
+                            if (onAck) onAck();
+                            return; // Stop the interval loop
+                        }
+                    }
+                } catch (e) {
+                    console.log('Error parsing SMS list:', e);
+                }
+            }
+        );
+    }, 5000); // Check inbox every 5 seconds for a reply
+}
+
+/**
  * Stop all emergency activities.
  */
 export async function stopEmergency() {
@@ -302,6 +366,7 @@ export async function stopEmergency() {
 
     if (emergencyInterval) { clearInterval(emergencyInterval); emergencyInterval = null; }
     if (offlineSmsInterval) { clearInterval(offlineSmsInterval); offlineSmsInterval = null; }
+    if (smsReplyInterval) { clearInterval(smsReplyInterval); smsReplyInterval = null; }
 
     if (activeSessionId) {
         try {
@@ -312,5 +377,38 @@ export async function stopEmergency() {
             });
         } catch { /* ignore */ }
         activeSessionId = null;
+    }
+}
+
+/**
+ * Escalate the emergency to the specified tier (layer 2 or 3).
+ */
+export async function escalateEmergencyLayer(layer: number, trackingUrl: string | null = null) {
+    if (!activeSessionId) return;
+    
+    const contacts = await loadContacts();
+    const targetContacts = contacts.filter(c => (c.layer || 1) === layer);
+    
+    // Hit backend escalation webhook
+    const netState = await NetInfo.fetch();
+    if (netState.isConnected && netState.isInternetReachable) {
+        try {
+            await fetchWithTimeout(`${BACKEND_URL}/api/emergency/escalate-layer`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: activeSessionId,
+                    new_layer: layer
+                }),
+            });
+        } catch (e) {
+            console.warn("Could not reach backend for escalate-layer");
+        }
+    }
+
+    // Fire SMS sequentially for this layer
+    const location = await getCurrentLocation() || await loadLocation();
+    if (targetContacts.length > 0 && location) {
+       await sendEmergencySmsToAll(targetContacts, location, trackingUrl);
     }
 }
